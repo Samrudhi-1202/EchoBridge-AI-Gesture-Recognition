@@ -3,6 +3,8 @@ import { useState } from "react";
 import GestureRecognition from "./components/GestureRecognition";
 import LiveISLRecognition from "./isl/LiveISLRecognition";
 import IndependentTest from "./isl/IndependentTest";
+import SpeechToText from "./components/SpeechToText";
+import TextToSpeech from "./components/TextToSpeech";
 
 function App() {
   const [confirmedGestures, setConfirmedGestures] = useState({});
@@ -57,6 +59,20 @@ function App() {
           disabled={mode === "test"}
         >
           Independent Test
+        </button>
+
+        <button
+          onClick={() => setMode("speech")}
+          disabled={mode === "speech"}
+        >
+          Speech-to-Text
+        </button>
+
+        <button
+          onClick={() => setMode("tts")}
+          disabled={mode === "tts"}
+        >
+          Text-to-Speech
         </button>
       </div>
 
@@ -113,8 +129,12 @@ function App() {
         </>
       ) : mode === "isl" ? (
         <LiveISLRecognition />
-      ) : (
+      ) : mode === "test" ? (
         <IndependentTest />
+      ) : mode === "speech" ? (
+        <SpeechToText />
+      ) : (
+        <TextToSpeech />
       )}
     </main>
   );
