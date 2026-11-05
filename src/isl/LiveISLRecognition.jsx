@@ -1,377 +1,606 @@
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import GestureRecognition from "../components/GestureRecognition";
-import {
-  classifyGesture,
-  getModelInfo,
-} from "./gestureClassifier";
+import { classifyGesture } from "./gestureClassifier";
 
 const RECORDING_DURATION = 3000;
-const SAMPLE_INTERVAL = 100;
+const KANNADA_TTS_URL = "http://127.0.0.1:8000/speak";
 
 const COMMUNICATION_MESSAGES = {
-  WATER: "I need water.",
-  THANK_YOU: "Thank you.",
-  YES: "Yes.",
-  NO: "No.",
-  FOOD: "I need food.",
+  WATER: {
+    "en-IN": "I need water.",
+    "kn-IN": "ನನಗೆ ನೀರು ಬೇಕು.",
+    "hi-IN": "मुझे पानी चाहिए।",
+  },
+  FOOD: {
+    "en-IN": "I need food.",
+    "kn-IN": "ನನಗೆ ಆಹಾರ ಬೇಕು.",
+    "hi-IN": "मुझे खाना चाहिए।",
+  },
+  THANK_YOU: {
+    "en-IN": "Thank you.",
+    "kn-IN": "ಧನ್ಯವಾದಗಳು.",
+    "hi-IN": "धन्यवाद।",
+  },
+  YES: {
+    "en-IN": "Yes.",
+    "kn-IN": "ಹೌದು.",
+    "hi-IN": "हाँ।",
+  },
+  NO: {
+    "en-IN": "No.",
+    "kn-IN": "ಇಲ್ಲ.",
+    "hi-IN": "नहीं।",
+  },
 };
 
-export default function LiveISLRecognition() {
-  const recordingRef = useRef(null);
-  const lastSampleRef = useRef(0);
+const LANGUAGE_NAMES = {
+  "en-IN": "English",
+  "kn-IN": "Kannada",
+  "hi-IN": "Hindi",
+};
 
-  const [recording, setRecording] = useState(false);
+function LiveISLRecognition() {
+  const [isRecording, setIsRecording] = useState(false);
+  const [countdown, setCountdown] = useState(0);
   const [result, setResult] = useState(null);
   const [confirmed, setConfirmed] = useState(false);
+  const [speechLanguage, setSpeechLanguage] = useState("en-IN");
+  const [speaking, setSpeaking] = useState(false);
+  const [speechError, setSpeechError] = useState("");
+  const [availableVoices, setAvailableVoices] = useState([]);
 
-  const [message, setMessage] = useState(
-    "Start the camera, then record a gesture."
-  );
+  const framesRef = useRef([]);
+  const recordingStartRef = useRef(null);
+  const timerRef = useRef(null);
+  const finishedRef = useRef(false);
+  const audioRef = useRef(null);
+  const audioUrlRef = useRef(null);
 
-  const modelInfo = getModelInfo();
+  useEffect(() => {
+    function loadVoices() {
+      if (window.speechSynthesis) {
+        setAvailableVoices(window.speechSynthesis.getVoices());
+      }
+    }
+
+    loadVoices();
+
+    if (window.speechSynthesis) {
+      window.speechSynthesis.addEventListener(
+        "voiceschanged",
+        loadVoices
+      );
+    }
+
+    return () => {
+      if (window.speechSynthesis) {
+        window.speechSynthesis.removeEventListener(
+          "voiceschanged",
+          loadVoices
+        );
+        window.speechSynthesis.cancel();
+      }
+
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+      }
+
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+
+      if (audioUrlRef.current) {
+        URL.revokeObjectURL(audioUrlRef.current);
+        audioUrlRef.current = null;
+      }
+    };
+  }, []);
+
+  function stopSpeaking() {
+    if (window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+      audioRef.current = null;
+    }
+
+    if (audioUrlRef.current) {
+      URL.revokeObjectURL(audioUrlRef.current);
+      audioUrlRef.current = null;
+    }
+
+    setSpeaking(false);
+  }
 
   function handleLandmarks(frame) {
-    const session = recordingRef.current;
-    if (!session) return;
+    if (!isRecording || finishedRef.current) return;
 
-    if (
-      frame.time - lastSampleRef.current <
-      SAMPLE_INTERVAL
-    ) {
+    if (frame.bothHands) {
+      framesRef.current.push(frame);
+    }
+  }
+
+  function finishRecording() {
+    if (finishedRef.current) return;
+
+    finishedRef.current = true;
+
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+
+    setIsRecording(false);
+    setCountdown(0);
+
+    const capturedFrames = [...framesRef.current];
+
+    if (capturedFrames.length < 5) {
+      setResult(null);
+      setSpeechError(
+        "Not enough hand movement was recorded. Keep both hands visible and try again."
+      );
       return;
     }
 
-    lastSampleRef.current = frame.time;
+    const classified = classifyGesture(capturedFrames);
 
-    session.frames.push({
-      time: frame.time - session.startTime,
-      hands: frame.hands,
-      bothHands: frame.bothHands,
+    if (!classified) {
+      setResult(null);
+      setSpeechError(
+        "Could not recognize the gesture. Please try again."
+      );
+      return;
+    }
+
+    const message =
+      COMMUNICATION_MESSAGES[classified.label] || {
+        "en-IN": "Gesture detected, but no message is available.",
+        "kn-IN": "ಸನ್ನೆ ಗುರುತಿಸಲಾಗಿದೆ, ಆದರೆ ಸಂದೇಶ ಲಭ್ಯವಿಲ್ಲ.",
+        "hi-IN": "इशारा पहचाना गया, लेकिन संदेश उपलब्ध नहीं है।",
+      };
+
+    setResult({
+      ...classified,
+      message,
     });
 
-    if (
-      frame.time - session.startTime <
-      RECORDING_DURATION
-    ) {
-      return;
-    }
-
-    recordingRef.current = null;
-    setRecording(false);
-
-    const frames = session.frames;
-
-    const bothHandsCount = frames.filter(
-      (item) => item.bothHands
-    ).length;
-
-    const detectionRate = frames.length
-      ? Math.round(
-          (bothHandsCount / frames.length) * 100
-        )
-      : 0;
-
-    if (detectionRate < 60) {
-      setResult(null);
-      setConfirmed(false);
-      setMessage(
-        `Both hands detected in only ${detectionRate}% of frames. Please try again.`
-      );
-      return;
-    }
-
-    const prediction = classifyGesture(frames);
-
-    if (!prediction) {
-      setResult(null);
-      setConfirmed(false);
-      setMessage(
-        "Not enough valid landmark data."
-      );
-      return;
-    }
-
-    setResult(prediction);
     setConfirmed(false);
-
-    if (
-      COMMUNICATION_MESSAGES[prediction.label]
-    ) {
-      setMessage(
-        "Experimental prediction ready. Please confirm whether the suggested message is correct."
-      );
-    } else {
-      setMessage(
-        "No communication message available for this gesture. Please try again."
-      );
-    }
+    setSpeechError("");
   }
 
   function startRecording() {
-    recordingRef.current = {
-      startTime: performance.now(),
-      frames: [],
-    };
+    stopSpeaking();
 
-    lastSampleRef.current = 0;
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+    }
+
+    framesRef.current = [];
+    recordingStartRef.current = performance.now();
+    finishedRef.current = false;
 
     setResult(null);
     setConfirmed(false);
-    setRecording(true);
+    setSpeechError("");
+    setCountdown(3);
+    setIsRecording(true);
 
-    setMessage(
-      "Recording for 3 seconds. Keep both hands visible."
-    );
+    timerRef.current = setInterval(() => {
+      const elapsed =
+        performance.now() - recordingStartRef.current;
+
+      const remaining = Math.max(
+        0,
+        Math.ceil((RECORDING_DURATION - elapsed) / 1000)
+      );
+
+      setCountdown(remaining);
+
+      if (elapsed >= RECORDING_DURATION) {
+        finishRecording();
+      }
+    }, 50);
   }
 
-  function confirmMessage() {
-    if (
-      !result ||
-      !COMMUNICATION_MESSAGES[result.label]
-    ) {
+  async function speakMessage(message, language = speechLanguage) {
+    if (!message) return;
+
+    stopSpeaking();
+    setSpeechError("");
+
+    // Kannada uses the local FastAPI + Edge TTS server.
+    if (language === "kn-IN") {
+      try {
+        const response = await fetch(KANNADA_TTS_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            text: message,
+          }),
+        });
+
+        if (!response.ok) {
+          let errorMessage = `Kannada speech server returned error ${response.status}.`;
+
+          try {
+            const errorData = await response.json();
+            if (errorData.detail) {
+              errorMessage = errorData.detail;
+            }
+          } catch {
+            // Keep the original error message.
+          }
+
+          throw new Error(errorMessage);
+        }
+
+        const audioBlob = await response.blob();
+
+        if (!audioBlob.size) {
+          throw new Error("The Kannada audio file is empty.");
+        }
+
+        const audioUrl = URL.createObjectURL(audioBlob);
+        audioUrlRef.current = audioUrl;
+
+        const audio = new Audio(audioUrl);
+        audioRef.current = audio;
+
+        audio.onended = () => {
+          setSpeaking(false);
+          audioRef.current = null;
+
+          URL.revokeObjectURL(audioUrl);
+          audioUrlRef.current = null;
+        };
+
+        audio.onerror = () => {
+          setSpeaking(false);
+          setSpeechError("Unable to play the Kannada audio.");
+          audioRef.current = null;
+
+          URL.revokeObjectURL(audioUrl);
+          audioUrlRef.current = null;
+        };
+
+        await audio.play();
+        setSpeaking(true);
+        return;
+      } catch (error) {
+        console.error("Kannada TTS error:", error);
+        setSpeaking(false);
+        setSpeechError(
+          `Kannada speech failed: ${error.message}. Check that the Python speech server is running on port 8000.`
+        );
+        return;
+      }
+    }
+
+    // English and Hindi use browser speech synthesis.
+    if (!window.speechSynthesis) {
+      setSpeechError(
+        "Your browser does not support text-to-speech."
+      );
       return;
     }
 
+    const synth = window.speechSynthesis;
+    const speech = new SpeechSynthesisUtterance(message);
+
+    speech.lang = language;
+
+    const languageCode = language.split("-")[0].toLowerCase();
+
+    const matchingVoice =
+      availableVoices.find(
+        (voice) =>
+          voice.lang.toLowerCase() === language.toLowerCase()
+      ) ||
+      availableVoices.find(
+        (voice) =>
+          voice.lang.toLowerCase().startsWith(languageCode + "-")
+      ) ||
+      availableVoices.find(
+        (voice) => voice.lang.toLowerCase() === languageCode
+      );
+
+    if (matchingVoice) {
+      speech.voice = matchingVoice;
+    }
+
+    speech.rate = 0.9;
+    speech.pitch = 1;
+    speech.volume = 1;
+
+    speech.onstart = () => {
+      setSpeaking(true);
+      setSpeechError("");
+    };
+
+    speech.onend = () => {
+      setSpeaking(false);
+    };
+
+    speech.onerror = (event) => {
+      setSpeaking(false);
+
+      if (
+        event.error !== "canceled" &&
+        event.error !== "interrupted"
+      ) {
+        setSpeechError(
+          `Speech could not be played in ${LANGUAGE_NAMES[language]}.`
+        );
+      }
+    };
+
+    synth.speak(speech);
+  }
+
+  function confirmMessage() {
+    if (!result) return;
+
     setConfirmed(true);
-    setMessage(
-      "Message confirmed by the user."
-    );
+
+    const message = result.message[speechLanguage];
+
+    speakMessage(message, speechLanguage);
   }
 
-  function tryAgain() {
-    recordingRef.current = null;
-    setRecording(false);
-    setResult(null);
-    setConfirmed(false);
-
-    setMessage(
-      "Ready to try again. Record another gesture."
-    );
-  }
-
-  const suggestedMessage = result
-    ? COMMUNICATION_MESSAGES[result.label]
-    : null;
+  const selectedMessage = result
+    ? result.message[speechLanguage]
+    : "";
 
   return (
     <div
       style={{
-        textAlign: "center",
-        padding: "30px 20px",
-        width: "100%",
-        maxWidth: "1000px",
-        margin: "0 auto",
-        boxSizing: "border-box",
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        gap: "20px",
+        maxWidth: 850,
+        margin: "20px auto",
+        padding: 20,
+        backgroundColor: "transparent",
+        borderRadius: 15,
+        color: "#000000",
       }}
     >
-      <h1
-        style={{
-          fontSize: "28px",
-          lineHeight: "1.4",
-          fontWeight: "700",
-          textAlign: "center",
-          margin: "0 0 20px 0",
-          padding: "10px 0",
-          height: "auto",
-          whiteSpace: "normal",
-        }}
-      >
-        EchoBridge AI — Experimental ISL Recognition
-      </h1>
+      <h2 style={{ textAlign: "center" }}>
+        ISL Recognition
+      </h2>
 
-      <p>
-        Reference recordings: {modelInfo.sampleCount}
+      <p style={{ textAlign: "center" }}>
+        Record your hand gesture and convert it into text and speech.
       </p>
 
-      <GestureRecognition
-        onHandLandmarks={handleLandmarks}
-      />
+      <GestureRecognition onHandLandmarks={handleLandmarks} />
 
-      <button
-        onClick={startRecording}
-        disabled={recording}
+      <section
         style={{
-          padding: "12px 20px",
-          marginTop: 15,
-          cursor: recording
-            ? "not-allowed"
-            : "pointer",
+          marginTop: 20,
+          padding: 20,
+          border: "1px solid #dddddd",
+          borderRadius: 12,
+          textAlign: "center",
         }}
       >
-        {recording
-          ? "Recording..."
-          : "Record and Compare (3 seconds)"}
-      </button>
+        <h3>Gesture Recording</h3>
 
-      <p>{message}</p>
+        <p>
+          <strong>Status:</strong>{" "}
+          {isRecording
+            ? "Recording..."
+            : result
+              ? "Recording completed."
+              : "Ready to record."}
+        </p>
 
-      {result && (
-        <div
+        {isRecording && (
+          <h2 style={{ fontSize: 35 }}>{countdown}</h2>
+        )}
+
+        <button
+          onClick={startRecording}
+          disabled={isRecording}
           style={{
-            border: "1px solid #888",
-            borderRadius: 10,
-            padding: 15,
-            width: "100%",
-            maxWidth: 400,
-            margin: "20px auto",
-            boxSizing: "border-box",
+            padding: "12px 24px",
+            borderRadius: 8,
+            border: "none",
+            backgroundColor: isRecording ? "#999" : "#795548",
+            color: "white",
+            cursor: isRecording ? "not-allowed" : "pointer",
+            fontSize: 16,
           }}
         >
-          <h2>
-            Closest example: {result.label}
-          </h2>
+          {isRecording
+            ? "Recording..."
+            : "Start 3-Second Recording"}
+        </button>
 
-          {suggestedMessage ? (
-            <div
-              style={{
-                backgroundColor: confirmed
-                  ? "#e8f5e9"
-                  : "#fff8e1",
-                color: confirmed
-                  ? "#1b5e20"
-                  : "#795548",
-                padding: 15,
-                borderRadius: 10,
-                marginTop: 12,
-              }}
-            >
-              {confirmed ? (
-                <>
-                  <h2>
-                    Confirmed Communication Message
-                  </h2>
+        {result && (
+          <button
+            onClick={startRecording}
+            style={{
+              marginLeft: 10,
+              padding: "12px 24px",
+              borderRadius: 8,
+              border: "none",
+              backgroundColor: "#8D6E63",
+              color: "white",
+              cursor: "pointer",
+              fontSize: 16,
+            }}
+          >
+            Try Again
+          </button>
+        )}
 
-                  <h2>{suggestedMessage}</h2>
+        {speechError && !result && (
+          <p style={{ color: "#B71C1C" }}>{speechError}</p>
+        )}
+      </section>
 
-                  <p>
-                    Confirmed by the user.
-                  </p>
-                </>
-              ) : (
-                <>
-                  <h3>
-                    Suggested message
-                  </h3>
-
-                  <p>{suggestedMessage}</p>
-
-                  <p>
-                    Is this what you intended
-                    to communicate?
-                  </p>
-
-                  <button
-                    onClick={confirmMessage}
-                    style={{
-                      padding: "10px 15px",
-                      margin: "5px",
-                      cursor: "pointer",
-                    }}
-                  >
-                    Confirm Message
-                  </button>
-
-                  <button
-                    onClick={tryAgain}
-                    style={{
-                      padding: "10px 15px",
-                      margin: "5px",
-                      cursor: "pointer",
-                    }}
-                  >
-                    Try Again
-                  </button>
-                </>
-              )}
-            </div>
-          ) : (
-            <div
-              style={{
-                backgroundColor: "#f3f4f6",
-                color: "#333",
-                padding: 15,
-                borderRadius: 10,
-                marginTop: 12,
-              }}
-            >
-              <h3>
-                Gesture not recognized for communication
-              </h3>
-
-              <p>
-                {result.label === "UNKNOWN"
-                  ? "Unknown gesture."
-                  : "Miscellaneous gesture (OTHER)."}
-              </p>
-
-              <p>
-                No communication message will be displayed.
-              </p>
-
-              <button
-                onClick={tryAgain}
-                style={{
-                  padding: "10px 15px",
-                  cursor: "pointer",
-                }}
-              >
-                Try Again
-              </button>
-            </div>
-          )}
+      {result && (
+        <section
+          style={{
+            marginTop: 20,
+            padding: 20,
+            backgroundColor: "#FFF4D6",
+            border: "1px solid #D8C69A",
+            borderRadius: 12,
+            color: "#3D3023",
+          }}
+        >
+          <h3 style={{ textAlign: "center" }}>
+            Recognition Result
+          </h3>
 
           <p>
-            Landmark distance:{" "}
+            <strong>Detected Gesture:</strong> {result.label}
+          </p>
+
+          <p>
+            <strong>Distance:</strong>{" "}
             {result.distance.toFixed(4)}
           </p>
 
-          {result.secondBestLabel && (
-            <div
+          <p>
+            <strong>Reference Recording:</strong>{" "}
+            {result.reference}
+          </p>
+
+          <hr />
+
+          <h3 style={{ textAlign: "center" }}>
+            Suggested Communication Message
+          </h3>
+
+          <div
+            style={{
+              padding: 20,
+              margin: "15px 0",
+              backgroundColor: "#FFF0CC",
+              borderRadius: 10,
+              textAlign: "center",
+              fontSize: 24,
+              fontWeight: "bold",
+            }}
+          >
+            {selectedMessage}
+          </div>
+
+          <label>
+            <strong>Select Speech Language:</strong>
+          </label>
+
+          <select
+            value={speechLanguage}
+            onChange={(event) => {
+              stopSpeaking();
+              setSpeechLanguage(event.target.value);
+              setConfirmed(false);
+              setSpeechError("");
+            }}
+            style={{
+              display: "block",
+              width: "100%",
+              padding: 12,
+              marginTop: 10,
+              marginBottom: 15,
+              borderRadius: 8,
+              fontSize: 16,
+            }}
+          >
+            <option value="en-IN">English</option>
+            <option value="kn-IN">Kannada</option>
+            <option value="hi-IN">Hindi</option>
+          </select>
+
+          <p>
+            <strong>Available browser voices:</strong>{" "}
+            {availableVoices.length}
+          </p>
+
+          <p>
+            <strong>Message status:</strong>{" "}
+            {confirmed
+              ? "Message confirmed."
+              : "Waiting for confirmation."}
+          </p>
+
+          <div style={{ textAlign: "center", marginTop: 15 }}>
+            <button
+              onClick={confirmMessage}
               style={{
-                backgroundColor: "#f3f4f6",
-                color: "#333",
-                padding: 12,
+                padding: "12px 22px",
+                margin: 5,
+                border: "none",
                 borderRadius: 8,
-                marginTop: 10,
-                textAlign: "left",
+                backgroundColor: "#4CAF50",
+                color: "white",
+                cursor: "pointer",
               }}
             >
-              <p>
-                <strong>
-                  Second closest gesture:
-                </strong>{" "}
-                {result.secondBestLabel}
-              </p>
+              {confirmed
+                ? "Confirmed — Speak Again"
+                : "Confirm Message & Speak"}
+            </button>
 
-              <p>
-                <strong>
-                  Second closest distance:
-                </strong>{" "}
-                {result.secondBestDistance.toFixed(4)}
-              </p>
+            <button
+              onClick={() =>
+                speakMessage(selectedMessage, speechLanguage)
+              }
+              style={{
+                padding: "12px 22px",
+                margin: 5,
+                border: "none",
+                borderRadius: 8,
+                backgroundColor: "#795548",
+                color: "white",
+                cursor: "pointer",
+              }}
+            >
+              Speak Again
+            </button>
 
-              <p>
-                <strong>Distance gap:</strong>{" "}
-                {result.distanceGap.toFixed(4)}
-              </p>
-            </div>
+            {speaking && (
+              <button
+                onClick={stopSpeaking}
+                style={{
+                  padding: "12px 22px",
+                  margin: 5,
+                  border: "none",
+                  borderRadius: 8,
+                  backgroundColor: "#C62828",
+                  color: "white",
+                  cursor: "pointer",
+                }}
+              >
+                Stop Speech
+              </button>
+            )}
+          </div>
+
+          {speechError && (
+            <p
+              style={{
+                color: "#B71C1C",
+                textAlign: "center",
+                marginTop: 15,
+              }}
+            >
+              {speechError}
+            </p>
           )}
-
-          <p>
-            Matched recording: {result.reference}
-          </p>
-
-          <p>
-            Experimental result only — not verified ISL
-            recognition.
-          </p>
-        </div>
+        </section>
       )}
     </div>
   );
 }
+
+export default LiveISLRecognition;
